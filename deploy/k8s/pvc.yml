@@ -1,0 +1,14 @@
+# Extracted ISOs, kernels/initrds, ISOs for the "download to RAM" types and
+# the generated boot.ipxe. Filled from the workstation with `./pxe push`.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pxe-data
+  namespace: pxe
+spec:
+  accessModes:
+    - ReadWriteOnce
+  # storageClassName: longhorn
+  resources:
+    requests:
+      storage: 60Gi

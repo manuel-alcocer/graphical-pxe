@@ -1,0 +1,21 @@
+# kubectl apply -k deploy/k8s
+namespace: pxe
+
+resources:
+  - namespace.yml
+  - smb-secret.yml
+  - pvc.yml
+  - deployment.yml
+  - service.yml
+
+configMapGenerator:
+  - name: pxe-nginx
+    files:
+      - default.conf=nginx.conf
+
+# Build services/samba and push it to a registry your cluster can pull from:
+#   docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/pxe-samba:0.1.0 --push services/samba
+images:
+  - name: pxe-samba
+    newName: registry.example.com/pxe-samba
+    newTag: 0.1.0

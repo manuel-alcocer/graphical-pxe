@@ -1,0 +1,24 @@
+# HTTP (iPXE menu and boot files) and SMB (Windows Setup) on a dedicated
+# LAN IP. The router's DHCP hands this address to iPXE in option 224 and
+# serves undionly.kpxe / snponly.efi itself over TFTP (see deploy/mikrotik).
+apiVersion: v1
+kind: Service
+metadata:
+  name: pxe
+  namespace: pxe
+  annotations:
+    # MetalLB: pick a free LAN IP outside the DHCP pool.
+    metallb.universe.tf/loadBalancerIPs: 192.168.1.214
+spec:
+  type: LoadBalancer
+  selector:
+    app: pxe
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+    - name: smb
+      port: 445
+      targetPort: smb
+      protocol: TCP

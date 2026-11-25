@@ -1,0 +1,31 @@
+#!ipxe
+# Embedded script: get an address, find the PXE server and load the menu over HTTP.
+
+:retry_dhcp
+dhcp || goto dhcp_failed
+
+# Router mode: the DHCP server (e.g. a MikroTik) hands out the HTTP server
+# address in private option 224, because next-server points at its own TFTP.
+# ProxyDHCP mode: the server is whoever answered the ProxyDHCP request.
+# Full DHCP mode (or QEMU user networking): fall back to next-server.
+isset ${224:string} && set pxe-server ${224:string} && goto load_menu ||
+isset ${proxydhcp/dhcp-server} && set pxe-server ${proxydhcp/dhcp-server} && goto load_menu ||
+isset ${next-server} && set pxe-server ${next-server} && goto load_menu ||
+echo No PXE server found (no ProxyDHCP answer and no next-server).
+goto shell
+
+:load_menu
+echo Loading menu from http://${pxe-server}/boot.ipxe ...
+chain --autofree http://${pxe-server}/boot.ipxe || goto menu_failed
+
+:dhcp_failed
+echo DHCP failed, retrying in 3 seconds...
+sleep 3
+goto retry_dhcp
+
+:menu_failed
+echo Could not load http://${pxe-server}/boot.ipxe
+prompt --timeout 5000 Press any key for the iPXE shell, or wait to retry... && goto shell || goto load_menu
+
+:shell
+shell

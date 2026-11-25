@@ -1,0 +1,709 @@
+#!/usr/bin/env python3
+"""pxe - manage the graphical PXE server: import ISOs, fetch netboot files, generate iPXE menus.
+
+Standard library only (Python 3.11+). External tools: 7z (for ISO extraction).
+"""
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import ipaddress
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tomllib
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass, field
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+CATALOG = ROOT / "catalog.toml"
+CATALOG_EXAMPLE = ROOT / "catalog.example.toml"
+ENV_FILE = Path(os.environ.get("PXE_ENV", ROOT / ".env"))
+ASSETS = ROOT / "assets"
+DATA = ROOT / "data"
+HTTP = DATA / "http"
+IMAGES = HTTP / "images"
+ISOS = HTTP / "iso"
+WINDOWS = HTTP / "windows"
+WIMBOOT_URL = "https://github.com/ipxe/wimboot/releases/latest/download/wimboot"
+
+CATEGORIES = {
+    "linux-install": "Linux installers",
+    "linux-live": "Linux live systems",
+    "windows-install": "Windows installers",
+    "windows-live": "Windows PE / live systems",
+    "tools": "Tools",
+}
+
+# Placeholders available in "args":
+#   {base}   -> http://<server>/images/<id>      (extracted ISO / downloaded files)
+#   {iso}    -> http://<server>/iso/<id>.iso     (the original ISO, for types that need it)
+#   {server} -> <server>                          (IP of the PXE server, resolved by iPXE at boot)
+PROFILES: dict[str, dict] = {
+    "ubuntu-live": {
+        "help": "Ubuntu/Mint/Pop!_OS desktop ISO (casper), live session. Downloads the ISO into RAM.",
+        "category": "linux-live",
+        "needs_iso": True,
+        "extract": ["casper/vmlinuz*", "casper/initrd*"],
+        "kernel": ["casper/vmlinuz", "casper/vmlinuz*"],
+        "initrd": ["casper/initrd", "casper/initrd.lz", "casper/initrd*"],
+        "args": "boot=casper ip=dhcp url={iso} cloud-config-url=/dev/null",
+    },
+    "ubuntu-server": {
+        "help": "Ubuntu live-server ISO (subiquity installer). Downloads the ISO into RAM.",
+        "category": "linux-install",
+        "needs_iso": True,
+        "extract": ["casper/vmlinuz*", "casper/initrd*"],
+        "kernel": ["casper/vmlinuz", "casper/vmlinuz*"],
+        "initrd": ["casper/initrd", "casper/initrd*"],
+        "args": "ip=dhcp url={iso} cloud-config-url=/dev/null",
+    },
+    "debian-live": {
+        "help": "Debian live ISO (live-boot). Fetches filesystem.squashfs over HTTP.",
+        "category": "linux-live",
+        "kernel": ["live/vmlinuz", "live/vmlinuz*"],
+        "initrd": ["live/initrd.img", "live/initrd.img*"],
+        "args": "boot=live components fetch={base}/live/filesystem.squashfs",
+    },
+    "fedora-live": {
+        "help": "Fedora Workstation/Spins live ISO (dracut livenet). Downloads the ISO into RAM.",
+        "category": "linux-live",
+        "needs_iso": True,
+        "extract": ["images/pxeboot/*"],
+        "kernel": ["images/pxeboot/vmlinuz"],
+        "initrd": ["images/pxeboot/initrd.img"],
+        "args": "root=live:{iso} rd.live.image rd.neednet=1 ip=dhcp",
+    },
+    "redhat-install": {
+        "help": "Anaconda DVD/full ISO (Fedora Server DVD, Rocky, Alma, RHEL): packages from the extracted tree.",
+        "category": "linux-install",
+        "kernel": ["images/pxeboot/vmlinuz"],
+        "initrd": ["images/pxeboot/initrd.img"],
+        "args": "inst.repo={base} ip=dhcp",
+    },
+    "redhat-netinst": {
+        "help": "Anaconda netinstall ISO (Fedora Everything, Rocky/Alma boot): stage2 local, packages from internet.",
+        "category": "linux-install",
+        "kernel": ["images/pxeboot/vmlinuz"],
+        "initrd": ["images/pxeboot/initrd.img"],
+        "args": "inst.stage2={base} ip=dhcp",
+    },
+    "arch": {
+        "help": "Arch Linux ISO (archiso, live + installer). Fetches airootfs over HTTP.",
+        "category": "linux-live",
+        "kernel": ["arch/boot/x86_64/vmlinuz-linux"],
+        "initrd": ["arch/boot/x86_64/initramfs-linux.img"],
+        "args": "archisobasedir=arch archiso_http_srv={base}/ ip=dhcp net.ifnames=0 BOOTIF=01-${netX/mac:hexhyp}",
+    },
+    "netboot": {
+        "help": "Kernel/initrd downloaded from URLs (kernel_url, initrd_url, files). No ISO needed.",
+        "category": "linux-install",
+        "kernel": [],
+        "initrd": [],
+        "args": "",
+    },
+    "custom": {
+        "help": "Any ISO: set kernel, initrd and args yourself in catalog.toml.",
+        "category": "linux-live",
+        "kernel": [],
+        "initrd": [],
+        "args": "",
+    },
+    "windows-install": {
+        "help": "Windows 10/11/Server ISO: boots boot.wim with wimboot and runs setup.exe from the SMB share.",
+        "category": "windows-install",
+        "windows": True,
+    },
+    "windows-pe": {
+        "help": "Any WinPE-based ISO (Hiren's BootCD PE, custom WinPE...): boots sources/boot.wim with wimboot.",
+        "category": "windows-live",
+        "windows": True,
+    },
+}
+
+
+# --------------------------------------------------------------------------- helpers
+
+def info(msg: str) -> None:
+    print(f"\033[1;34m==>\033[0m {msg}")
+
+
+def warn(msg: str) -> None:
+    print(f"\033[1;33mwarning:\033[0m {msg}", file=sys.stderr)
+
+
+def die(msg: str) -> None:
+    print(f"\033[1;31merror:\033[0m {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def load_env() -> dict[str, str]:
+    env: dict[str, str] = {}
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                env[key.strip()] = value.strip().strip('"').strip("'")
+    return env
+
+
+def load_catalog() -> list[dict]:
+    if not CATALOG.exists():
+        if not CATALOG_EXAMPLE.exists():
+            die(f"{CATALOG.name} not found")
+        shutil.copy2(CATALOG_EXAMPLE, CATALOG)
+        info(f"created {CATALOG.name} from {CATALOG_EXAMPLE.name}")
+    with CATALOG.open("rb") as fh:
+        entries = tomllib.load(fh).get("entry", [])
+    seen: set[str] = set()
+    for entry in entries:
+        for key in ("id", "type"):
+            if key not in entry:
+                die(f"catalog entry {entry} is missing '{key}'")
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", entry["id"]):
+            die(f"invalid id '{entry['id']}' (use letters, digits, '.', '_' and '-')")
+        if entry["id"] in seen:
+            die(f"duplicate id '{entry['id']}' in catalog")
+        if entry["type"] not in PROFILES:
+            die(f"entry '{entry['id']}': unknown type '{entry['type']}' (see './pxe types')")
+        seen.add(entry["id"])
+    return entries
+
+
+def force_rmtree(path: Path) -> None:
+    """rmtree that also handles read-only files/dirs as extracted from ISOs."""
+    def onerror(func, p, _exc):
+        os.chmod(p, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+        func(p)
+    if path.exists():
+        shutil.rmtree(path, onexc=onerror) if sys.version_info >= (3, 12) else shutil.rmtree(path, onerror=onerror)
+
+
+def make_readable(path: Path) -> None:
+    """ISO contents are often 0444/0555; make sure everything is u+w and world-readable."""
+    for dirpath, dirnames, filenames in os.walk(path):
+        os.chmod(dirpath, 0o755)
+        for name in filenames:
+            os.chmod(os.path.join(dirpath, name), 0o644)
+
+
+def find_file(root: Path, patterns: list[str]) -> str | None:
+    """Return the first relative path under root matching any pattern (case-insensitive)."""
+    if not root.is_dir():
+        return None
+    files = sorted(
+        str(p.relative_to(root)).replace(os.sep, "/") for p in root.rglob("*") if p.is_file()
+    )
+    lowered = [f.lower() for f in files]
+    for pattern in patterns:
+        pat = pattern.lower()
+        for original, low in zip(files, lowered):
+            if fnmatch.fnmatchcase(low, pat):
+                return original
+    return None
+
+
+def download(url: str, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    info(f"downloading {url}")
+    req = urllib.request.Request(url, headers={"User-Agent": "pxe-server/1.0"})
+    with urllib.request.urlopen(req) as resp, tmp.open("wb") as out:
+        shutil.copyfileobj(resp, out, length=1 << 20)
+    tmp.rename(dest)
+
+
+def as_list(value) -> list[str]:
+    if value is None:
+        return []
+    return [value] if isinstance(value, str) else list(value)
+
+
+def url_path(*parts: str) -> str:
+    return "/".join(urllib.parse.quote(p, safe="/._-~") for p in parts)
+
+
+# --------------------------------------------------------------------------- commands
+
+def cmd_init(args) -> None:
+    if ENV_FILE.exists() and not args.force:
+        die(".env already exists (use --force to overwrite)")
+    route = subprocess.run(["ip", "-4", "route", "get", "1.1.1.1"], capture_output=True, text=True).stdout
+    m = re.search(r"dev (\S+) src (\S+)", route)
+    if not m:
+        die("could not detect the default network interface; copy .env.example to .env and edit it")
+    iface, ip = m.group(1), m.group(2)
+    addr = subprocess.run(["ip", "-4", "-o", "addr", "show", "dev", iface], capture_output=True, text=True).stdout
+    m2 = re.search(r"inet (\S+)", addr)
+    network = ipaddress.ip_interface(m2.group(1)).network if m2 else ipaddress.ip_network(f"{ip}/24", strict=False)
+    template = (ROOT / ".env.example").read_text()
+    template = re.sub(r"^INTERFACE=.*$", f"INTERFACE={iface}", template, flags=re.M)
+    template = re.sub(r"^SERVER_IP=.*$", f"SERVER_IP={ip}", template, flags=re.M)
+    template = re.sub(r"^PROXY_SUBNET=.*$", f"PROXY_SUBNET={network.network_address}", template, flags=re.M)
+    ENV_FILE.write_text(template)
+    info(f"wrote .env  (INTERFACE={iface}, SERVER_IP={ip}, PROXY_SUBNET={network.network_address})")
+
+
+def cmd_types(_args) -> None:
+    for name, prof in PROFILES.items():
+        print(f"  {name:<16} [{prof['category']}]  {prof['help']}")
+
+
+def extract_iso(iso: Path, dest: Path, patterns: list[str] | None, windows: bool) -> None:
+    if not shutil.which("7z"):
+        die("7z not found (Arch: pacman -S 7zip, Debian/Ubuntu: apt install 7zip)")
+    fs_types = ["udf", "iso"] if windows else ["iso", "udf"]
+    for fs_type in fs_types + [None]:
+        force_rmtree(dest)
+        dest.mkdir(parents=True)
+        cmd = ["7z", "x", "-y", "-bso0", "-bsp1", f"-o{dest}"]
+        if fs_type:
+            cmd.append(f"-t{fs_type}")
+        cmd.append(str(iso))
+        if patterns:
+            cmd += ["-r-", *patterns]
+        info(f"extracting {iso.name} ({fs_type or 'auto'}) -> {dest.relative_to(ROOT)}")
+        if subprocess.run(cmd).returncode == 0 and any(dest.iterdir()):
+            make_readable(dest)
+            return
+    die(f"could not extract {iso}")
+
+
+def append_catalog_entry(entry: dict) -> None:
+    lines = ["", "[[entry]]"]
+    for key, value in entry.items():
+        lines.append(f'{key} = "{value}"')
+    with CATALOG.open("a") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
+def cmd_import(args) -> None:
+    iso = Path(args.iso).expanduser().resolve()
+    if not iso.is_file():
+        die(f"{iso} does not exist")
+    profile = PROFILES[args.type]
+    if args.type == "netboot":
+        die("'netboot' entries are not imported from ISOs; add them to catalog.toml directly")
+    entry_id = args.id or re.sub(r"[^A-Za-z0-9._-]+", "-", iso.stem).strip("-").lower()
+    existing = {e["id"] for e in load_catalog()}
+    dest = IMAGES / entry_id
+    if dest.exists() and not args.force:
+        die(f"{dest.relative_to(ROOT)} already exists (use --force to re-import)")
+
+    extract_iso(iso, dest, profile.get("extract"), profile.get("windows", False))
+
+    if profile.get("needs_iso"):
+        ISOS.mkdir(parents=True, exist_ok=True)
+        target = ISOS / f"{entry_id}.iso"
+        target.unlink(missing_ok=True)
+        try:
+            os.link(iso, target)
+            info(f"hard-linked ISO -> {target.relative_to(ROOT)}")
+        except OSError:
+            info(f"copying ISO -> {target.relative_to(ROOT)}")
+            shutil.copy2(iso, target)
+        os.chmod(target, 0o644)
+
+    if entry_id in existing:
+        info(f"'{entry_id}' already in catalog.toml, entry left unchanged")
+    else:
+        entry = {"id": entry_id, "type": args.type, "label": args.label or iso.stem}
+        if args.category:
+            entry["category"] = args.category
+        append_catalog_entry(entry)
+        info(f"added '{entry_id}' to catalog.toml")
+    info("run './pxe build' to regenerate the menu")
+
+
+@dataclass
+class BootItem:
+    id: str
+    label: str
+    category: str
+    script: list[str] = field(default_factory=list)
+
+
+def ipxe_label(text: str) -> str:
+    # iPXE's bitmap font is ASCII only
+    return text.encode("ascii", "replace").decode().replace("?", "-")
+
+
+def build_linux(entry: dict, profile: dict) -> BootItem | None:
+    eid = entry["id"]
+    src = entry.get("files_from", eid)  # reuse the files of another entry
+    root = IMAGES / src
+
+    if entry["type"] == "netboot":
+        sources = {"kernel": as_list(entry.get("kernel_url")), "initrd": as_list(entry.get("initrd_url"))}
+        if not sources["kernel"]:
+            warn(f"{eid}: netboot entry needs kernel_url")
+            return None
+        for url in sources["kernel"] + sources["initrd"] + as_list(entry.get("files")):
+            dest = root / Path(urllib.parse.urlparse(url).path).name
+            if not dest.exists():
+                try:
+                    download(url, dest)
+                except Exception as exc:  # noqa: BLE001
+                    warn(f"{eid}: download failed for {url}: {exc}")
+                    return None
+        kernel = Path(urllib.parse.urlparse(sources["kernel"][0]).path).name
+        initrds = [Path(urllib.parse.urlparse(u).path).name for u in sources["initrd"]]
+    else:
+        kernel = find_file(root, as_list(entry.get("kernel")) or profile["kernel"])
+        # catalog "initrd" = one pattern per initrd to load (in order);
+        # profile "initrd" = alternative patterns for a single initrd.
+        groups = [[p] for p in as_list(entry.get("initrd"))] or [profile["initrd"]]
+        initrds = [found for group in groups if (found := find_file(root, group))]
+        if not kernel or not initrds:
+            warn(f"{eid}: kernel/initrd not found in {root.relative_to(ROOT)} (imported? right type?)")
+            return None
+        if profile.get("needs_iso") and not (ISOS / f"{src}.iso").exists():
+            warn(f"{eid}: needs {ISOS.relative_to(ROOT)}/{src}.iso")
+            return None
+
+    args = entry.get("args", profile["args"])
+    if entry.get("extra_args"):
+        args = f"{args} {entry['extra_args']}".strip()
+    # Plain replace (not str.format) so iPXE variables like ${netX/mac} pass through untouched
+    for key, value in {
+        "{base}": f"http://${{pxe-server}}/{url_path('images', src)}",
+        "{iso}": f"http://${{pxe-server}}/{url_path('iso', src + '.iso')}",
+        "{server}": "${pxe-server}",
+    }.items():
+        args = args.replace(key, value)
+
+    base = f"http://${{pxe-server}}/{url_path('images', src)}"
+    initrd_names = [f"initrd{i}{Path(p).suffix}" if len(initrds) > 1 else "initrd" for i, p in enumerate(initrds)]
+    initrd_args = " ".join(f"initrd={n}" for n in initrd_names)
+    script = [f"kernel {base}/{url_path(kernel)} {initrd_args} {args}".rstrip() + " || goto failed"]
+    for name, path in zip(initrd_names, initrds):
+        script.append(f"initrd --name {name} {base}/{url_path(path)} || goto failed")
+    script.append("boot || goto failed")
+    return BootItem(eid, entry.get("label", eid), entry.get("category", profile["category"]), script)
+
+
+def write_windows_scripts(eid: str, src: str, setup_rel: str, env: dict[str, str]) -> None:
+    server = env.get("SERVER_IP") or die("SERVER_IP must be set in .env for Windows installers")
+    user, password = env.get("SMB_USER", "pxe"), env.get("SMB_PASS", "pxe")
+    unc_setup = f"Z:\\{src}\\" + setup_rel.replace("/", "\\")
+    out = WINDOWS / eid
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "winpeshl.ini").write_text("[LaunchApps]\r\n\"install.cmd\"\r\n", newline="")
+    script = f"""@echo off
+title Network Windows Setup ({eid})
+echo [%TIME%] Initializing network...
+wpeinit
+wpeutil WaitForNetwork >nul 2>&1
+rem Without this, WinPE may try IPsec (IKE) towards the server and SMB fails with error 53
+wpeutil DisableFirewall >nul 2>&1
+set TRIES=0
+:connect
+set /a TRIES+=1
+echo [%TIME%] Connecting to \\\\{server}\\images (attempt %TRIES%)...
+rem Retry while the WinPE network stack settles
+net use Z: \\\\{server}\\images /user:{user} {password} >nul 2>&1
+if not errorlevel 1 goto setup
+if %TRIES% GEQ 150 goto failed
+ping -n 4 127.0.0.1 >nul
+goto connect
+:setup
+echo [%TIME%] Connected. Starting {unc_setup}
+{unc_setup}
+rem Newer setup.exe (Win11 24H2 / Server 2025) hands off to SetupHost.exe and returns at once.
+rem If this script ended now, winpeshl would exit and WinPE would reboot: wait for setup instead.
+:wait_setup
+ping -n 6 127.0.0.1 >nul
+tasklist | findstr /i /b "setup" >nul && goto wait_setup
+echo Setup finished. Rebooting...
+wpeutil reboot
+goto end
+:failed
+echo Could not connect to \\\\{server}\\images:
+net use Z: \\\\{server}\\images /user:{user} {password}
+echo If 'ipconfig' shows no adapter, this WinPE has no driver for the network card
+echo (e.g. virtio in VMs: use e1000e, or add drivers to boot.wim). Dropping to a prompt.
+ipconfig
+cmd.exe
+:end
+"""
+    (out / "install.cmd").write_text(script.replace("\n", "\r\n"), newline="")
+
+
+def build_windows(entry: dict, profile: dict, env: dict[str, str]) -> BootItem | None:
+    eid = entry["id"]
+    src = entry.get("files_from", eid)  # reuse the files of another entry
+    root = IMAGES / src
+    wim = find_file(root, as_list(entry.get("wim")) or ["sources/boot.wim", "*/boot.wim", "*.wim"])
+    if not wim:
+        warn(f"{eid}: boot.wim not found in {root.relative_to(ROOT)}")
+        return None
+    bcd = find_file(root, ["boot/bcd"])
+    sdi = find_file(root, ["boot/boot.sdi"])
+    base = f"http://${{pxe-server}}/{url_path('images', src)}"
+
+    wimboot_args = entry.get("wimboot_args", "")
+    script = [f"kernel http://${{pxe-server}}/wimboot {wimboot_args}".rstrip() + " || goto failed"]
+    files: list[tuple[str, str]] = []
+    if entry["type"] == "windows-install":
+        setup = find_file(root, ["sources/setup.exe", "setup.exe"])
+        if not setup:
+            warn(f"{eid}: setup.exe not found, is this a Windows installation ISO?")
+            return None
+        write_windows_scripts(eid, src, setup, env)
+        win = f"http://${{pxe-server}}/{url_path('windows', eid)}"
+        files += [("winpeshl.ini", f"{win}/winpeshl.ini"), ("install.cmd", f"{win}/install.cmd")]
+    if bcd:
+        files.append(("BCD", f"{base}/{url_path(bcd)}"))
+    if sdi:
+        files.append(("boot.sdi", f"{base}/{url_path(sdi)}"))
+    files.append(("boot.wim", f"{base}/{url_path(wim)}"))
+    # The argument after the URL is the filename wimboot sees (iPXE wraps it in a CPIO header)
+    script += [f"initrd --name {name} {url} {name} || goto failed" for name, url in files]
+    script.append("boot || goto failed")
+    return BootItem(eid, entry.get("label", eid), entry.get("category", profile["category"]), script)
+
+
+def render_menu(items: list[BootItem], env: dict[str, str]) -> str:
+    timeout_ms = int(env.get("MENU_TIMEOUT", "0")) * 1000
+    by_cat: dict[str, list[BootItem]] = {c: [] for c in CATEGORIES}
+    for item in items:
+        by_cat.setdefault(item.category, []).append(item)
+
+    out = [
+        "#!ipxe",
+        "# GENERATED by './pxe build' from catalog.toml - do not edit by hand",
+        "",
+        "isset ${pxe-server} || set pxe-server ${next-server}",
+        "set menu-timeout " + str(timeout_ms),
+        "",
+        "# Graphical console: 1024x768 framebuffer with a PNG background (falls back to text)",
+        "console --x 1024 --y 768 --picture http://${pxe-server}/assets/background.png "
+        "--left 80 --right 80 --top 152 --bottom 76 ||",
+        "colour --rgb 0x4c6ef5 4",
+        "colour --rgb 0xe9ecff 7",
+        "colour --rgb 0x8f9bc7 6",
+        "cpair --foreground 7 --background 9 0",
+        "cpair --foreground 7 --background 9 1",
+        "cpair --foreground 7 --background 4 2",
+        "cpair --foreground 6 --background 9 3",
+        "",
+        ":main",
+        "menu Choose what to boot",
+    ]
+    groups = [("Linux", ["linux-install", "linux-live"]), ("Windows", ["windows-install", "windows-live"])]
+    for title, cats in groups:
+        out.append(f"item --gap -- {title}")
+        for cat in cats:
+            count = len(by_cat.get(cat, []))
+            out.append(f"item menu-{cat}    {CATEGORIES[cat]}  ({count})")
+    extra_cats = [c for c in by_cat if c not in CATEGORIES and by_cat[c]]
+    for cat in extra_cats:
+        out.append(f"item menu-{cat}    {ipxe_label(cat)}  ({len(by_cat[cat])})")
+    out += [
+        "item --gap -- Tools",
+    ]
+    for item in by_cat.get("tools", []):
+        out.append(f"item entry-{item.id}    {ipxe_label(item.label)}")
+    out += [
+        "item netbootxyz    netboot.xyz (internet, hundreds of distros)",
+        "item local         Boot from local disk",
+        "item shell         iPXE shell",
+        "item reboot        Reboot",
+        "item poweroff      Power off",
+        # main-choice remembers the last category, so Esc in a submenu returns to it
+        "iseq ${menu-timeout} 0 && goto main_choose ||",
+        "isset ${main-choice} && goto main_choose ||",
+        "choose --timeout ${menu-timeout} --default local main-choice || goto main",
+        "goto ${main-choice}",
+        ":main_choose",
+        "choose --default ${main-choice} main-choice || goto main",
+        "goto ${main-choice}",
+        "",
+    ]
+
+    for cat in list(CATEGORIES) + extra_cats:
+        if cat == "tools":
+            continue
+        cat_items = by_cat.get(cat, [])
+        title = CATEGORIES.get(cat, cat)
+        out += [f":menu-{cat}", f"menu {ipxe_label(title)}"]
+        if cat_items:
+            for item in cat_items:
+                out.append(f"item entry-{item.id}    {ipxe_label(item.label)}")
+        else:
+            out.append("item --gap -- Nothing here yet: import an ISO with './pxe import'")
+        out += [
+            "item --gap --",
+            "item main    < Back",
+            "choose selected || goto main",
+            "goto ${selected}",
+            "",
+        ]
+
+    for item in items:
+        out += [f":entry-{item.id}", f"echo Booting {ipxe_label(item.label)} ...", *item.script, ""]
+
+    out += [
+        ":netbootxyz",
+        "chain --autofree https://boot.netboot.xyz || goto failed",
+        "",
+        ":local",
+        "iseq ${platform} efi && exit ||",
+        "sanboot --no-describe --drive 0x80 || goto failed",
+        "",
+        ":shell",
+        "echo Type 'exit' to return to the menu.",
+        "shell",
+        "goto main",
+        "",
+        ":reboot",
+        "reboot",
+        "",
+        ":poweroff",
+        "poweroff",
+        "",
+        ":failed",
+        "echo",
+        "echo Boot failed. Check the server logs: docker compose logs http",
+        "prompt Press any key to return to the menu...",
+        "imgfree",
+        "goto main",
+        "",
+    ]
+    return "\n".join(out)
+
+
+def cmd_build(_args) -> None:
+    env = load_env()
+    entries = load_catalog()
+    for d in (HTTP, IMAGES, ISOS, WINDOWS, HTTP / "assets"):
+        d.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ASSETS / "background.png", HTTP / "assets" / "background.png")
+
+    items: list[BootItem] = []
+    for entry in entries:
+        if not entry.get("enabled", True):
+            continue
+        profile = PROFILES[entry["type"]]
+        item = build_windows(entry, profile, env) if profile.get("windows") else build_linux(entry, profile)
+        if item:
+            items.append(item)
+
+    if any(PROFILES[i_e["type"]].get("windows") for i_e in entries if i_e.get("enabled", True)):
+        wimboot = HTTP / "wimboot"
+        if not wimboot.exists():
+            download(WIMBOOT_URL, wimboot)
+
+    (HTTP / "boot.ipxe").write_text(render_menu(items, env))
+    info(f"generated {(HTTP / 'boot.ipxe').relative_to(ROOT)} with {len(items)} entries")
+    for cat, title in CATEGORIES.items():
+        names = [i.id for i in items if i.category == cat]
+        if names:
+            print(f"    {title}: {', '.join(names)}")
+
+
+def cmd_export_ipxe(args) -> None:
+    """Copy the iPXE binaries out of the dnsmasq image (e.g. to upload them to a router's TFTP)."""
+    out = Path(args.dir)
+    out.mkdir(parents=True, exist_ok=True)
+    cid = subprocess.run(["docker", "create", args.image], capture_output=True, text=True)
+    if cid.returncode != 0:
+        die(f"docker create {args.image} failed (build it with 'docker compose build dnsmasq'): {cid.stderr.strip()}")
+    cid = cid.stdout.strip()
+    try:
+        for name in ("undionly.kpxe", "snponly.efi", "ipxe.efi"):
+            subprocess.run(["docker", "cp", f"{cid}:/srv/tftp/{name}", str(out / name)], check=True)
+            info(f"exported {out / name}")
+    finally:
+        subprocess.run(["docker", "rm", cid], capture_output=True)
+
+
+def cmd_push(args) -> None:
+    """rsync data/http into the PVC of the Kubernetes deployment (through its 'sync' container)."""
+    env = load_env()
+    kubectl = ["kubectl"]
+    if env.get("K8S_CONTEXT"):
+        kubectl += ["--context", env["K8S_CONTEXT"]]
+    kubectl += ["-n", env.get("K8S_NAMESPACE", "pxe")]
+    res = subprocess.run(kubectl + ["get", "pod", "-l", "app=pxe", "--field-selector=status.phase=Running",
+                                    "-o", "jsonpath={.items[0].metadata.name}"], capture_output=True, text=True)
+    pod = res.stdout.strip()
+    if res.returncode != 0 or not pod:
+        die(f"no running pod with label app=pxe: {res.stderr.strip()}")
+    if not (HTTP / "boot.ipxe").exists():
+        die("data/http/boot.ipxe not found; run './pxe build' first")
+
+    import shlex
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        # rsync calls "<rsh> <host> rsync --server ...": turn that into kubectl exec.
+        rsh = Path(tmp) / "kubectl-rsh"
+        rsh.write_text("#!/bin/sh\npod=\"$1\"; shift\n"
+                       f"exec {shlex.join(kubectl)} exec -i -c sync \"$pod\" -- \"$@\"\n")
+        rsh.chmod(0o755)
+        cmd = ["rsync", "-rlt", "--chmod=D755,F644", "--info=progress2", "--blocking-io",
+               "-e", str(rsh), f"{HTTP}/", f"{pod}:/srv/http/"]
+        if args.delete:
+            cmd.insert(1, "--delete")
+        info(f"syncing {HTTP.relative_to(ROOT)}/ -> {pod}:/srv/http/")
+        if subprocess.run(cmd).returncode != 0:
+            die("rsync failed")
+    info("done")
+
+
+def cmd_list(_args) -> None:
+    for entry in load_catalog():
+        root = IMAGES / entry.get("files_from", entry["id"])
+        status = "ready" if root.is_dir() and any(root.iterdir()) else "not imported/downloaded"
+        if not entry.get("enabled", True):
+            status = "disabled"
+        cat = entry.get("category", PROFILES[entry["type"]]["category"])
+        print(f"  {entry['id']:<28} {entry['type']:<16} {cat:<16} {status}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="pxe", description=__doc__.splitlines()[0])
+    parser.add_argument("--env", help="settings file to use instead of .env (also: PXE_ENV)")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("init", help="detect interface/IP/subnet and write .env")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(func=cmd_init)
+
+    sub.add_parser("types", help="list supported entry types").set_defaults(func=cmd_types)
+    sub.add_parser("list", help="list catalog entries and their status").set_defaults(func=cmd_list)
+    sub.add_parser("build", help="download netboot files and generate the iPXE menu").set_defaults(func=cmd_build)
+
+    p = sub.add_parser("import", help="extract an ISO and add it to the catalog")
+    p.add_argument("iso")
+    p.add_argument("--type", "-t", required=True, choices=PROFILES)
+    p.add_argument("--id")
+    p.add_argument("--label", "-l")
+    p.add_argument("--category", "-c", help=f"override category ({', '.join(CATEGORIES)})")
+    p.add_argument("--force", action="store_true", help="re-extract if it already exists")
+    p.set_defaults(func=cmd_import)
+
+    p = sub.add_parser("export-ipxe", help="copy the iPXE binaries out of the dnsmasq image")
+    p.add_argument("dir", nargs="?", default="ipxe-bin")
+    p.add_argument("--image", default="pxe-dnsmasq")
+    p.set_defaults(func=cmd_export_ipxe)
+
+    p = sub.add_parser("push", help="upload data/http to the Kubernetes deployment (rsync over kubectl exec)")
+    p.add_argument("--delete", action="store_true", help="delete remote files that no longer exist locally")
+    p.set_defaults(func=cmd_push)
+
+    args = parser.parse_args()
+    if args.env:
+        global ENV_FILE
+        ENV_FILE = Path(args.env).resolve()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

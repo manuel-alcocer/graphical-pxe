@@ -1,0 +1,50 @@
+# Boot menu catalog. After editing, run:  ./pxe build
+#
+# Each [[entry]] needs: id, type, label. Optional: category, args, extra_args,
+# kernel, initrd, enabled = false. See './pxe types' for the supported types.
+# Categories: linux-install, linux-live, windows-install, windows-live, tools
+#
+# ISOs are added with:  ./pxe import <file.iso> --type <type> --label "..."
+# ('import' appends the entry here for you.)
+
+# ---------------------------------------------------------------- netboot (no ISO needed)
+
+[[entry]]
+id = "debian-13-netinst"
+type = "netboot"
+label = "Debian 13 (trixie) - installer"
+category = "linux-install"
+kernel_url = "http://deb.debian.org/debian/dists/trixie/main/installer-amd64/current/images/netboot/debian-installer/amd64/linux"
+initrd_url = "http://deb.debian.org/debian/dists/trixie/main/installer-amd64/current/images/netboot/debian-installer/amd64/initrd.gz"
+
+[[entry]]
+id = "alpine-live"
+type = "netboot"
+label = "Alpine Linux (live, RAM)"
+category = "linux-live"
+kernel_url = "http://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/netboot/vmlinuz-lts"
+initrd_url = "http://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/netboot/initramfs-lts"
+files = ["http://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/netboot/modloop-lts"]
+args = "ip=dhcp modloop={base}/modloop-lts alpine_repo=http://dl-cdn.alpinelinux.org/alpine/latest-stable/main"
+
+# ---------------------------------------------------------------- imported ISOs
+# './pxe import' appends entries here. Examples of what they look like
+# (each needs its ISO imported first):
+#
+# [[entry]]
+# id = "winserver-2025"
+# type = "windows-install"
+# label = "Windows Server 2025 - setup"
+#
+# # Plain WinPE: index 1 of the same boot.wim (index 2 is Setup)
+# [[entry]]
+# id = "winpe-server-2025"
+# type = "windows-pe"
+# label = "WinPE command prompt (Windows Server 2025)"
+# files_from = "winserver-2025"
+# wimboot_args = "index=1"
+#
+# [[entry]]
+# id = "ubuntu-26.04-server"
+# type = "ubuntu-server"
+# label = "Ubuntu Server 26.04.1 LTS - installer"
