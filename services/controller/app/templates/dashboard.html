@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block head %}<meta http-equiv="refresh" content="15">{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+<p class="subtitle">Who is booting from the network right now, and what they use. Refreshes every 15 s.</p>
+
+<div class="grid cols-4">
+  <div class="card stat"><div class="label">Clients, last 24 h</div><div class="value">{{ stats.clients_day }}</div><div class="muted small">{{ stats.clients_total }} known in total</div></div>
+  <div class="card stat"><div class="label">Boots, last 24 h</div><div class="value">{{ stats.boots_day }}</div><div class="muted small">installers, live systems, tools</div></div>
+  <div class="card stat"><div class="label">Served over HTTP, 24 h</div><div class="value">{{ stats.bytes_day|bytes }}</div><div class="muted small">kernels, initrds, ISOs, boot.wim</div></div>
+  <div class="card stat"><div class="label">Windows SMB sessions</div><div class="value">{{ smb|length }}</div><div class="muted small">live, from smbstatus</div></div>
+</div>
+
+<div class="grid cols-2" style="margin-top:16px">
+  <div>
+    <div class="card">
+      <h2>Active now <span class="muted small">(last 15 min)</span></h2>
+      {% if active %}
+      <table>
+        <thead><tr><th>Client</th><th>Booted</th><th>Last download</th><th class="right">Last hour</th></tr></thead>
+        <tbody>
+        {% for c in active %}
+        <tr>
+          <td><span class="dot live"></span><a href="/clients/{{ c.mac }}">{{ c.name or c.hostname or c.mac }}</a>
+            <div class="muted small mono">{{ c.ip or '' }} · {{ c.group_name }}</div></td>
+          <td>{{ label(c.last_item) or '—' }}</td>
+          <td>{% if c.last_path %}<span class="mono small">{{ c.last_path.path }}</span><div class="muted small">{{ c.last_path.ts|ago }}</div>{% else %}<span class="muted">menu only</span>{% endif %}</td>
+          <td class="right nowrap">{{ c.bytes_recent|bytes }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}<div class="empty">Nobody is booting right now.</div>{% endif %}
+    </div>
+
+    <div class="card">
+      <div class="section-head"><h2>Recent activity</h2><a href="/activity" class="small">All activity →</a></div>
+      {% with rows=recent, show_who=true %}{% include "_activity.html" %}{% endwith %}
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>Windows share (SMB)</h2>
+      {% if smb %}
+      {% for s in smb %}
+      <div style="margin-bottom:10px">
+        <span class="dot live"></span>{% if s.mac %}<a href="/clients/{{ s.mac }}">{{ s.ip }}</a>{% else %}{{ s.ip }}{% endif %}
+        <span class="muted small">as {{ s.user }}</span>
+        {% for f in s.files[:6] %}<div class="mono small muted" style="margin-left:14px">{{ f }}</div>{% endfor %}
+        {% if s.files|length > 6 %}<div class="muted small" style="margin-left:14px">and {{ s.files|length - 6 }} more open files</div>{% endif %}
+      </div>
+      {% endfor %}
+      {% else %}<div class="empty">No open SMB sessions.</div>{% endif %}
+    </div>
+
+    <div class="card">
+      <div class="section-head"><h2>Most used images, 7 days</h2><a href="/images" class="small">All images →</a></div>
+      {% if images %}
+      {% for i in images %}
+      <div style="margin-bottom:12px">
+        <div style="display:flex;justify-content:space-between;gap:12px">
+          <a href="/activity?item={{ i.id }}">{{ i.label }}</a>
+          <span class="muted small nowrap">{{ i.boots_week }} boots · {{ i.http_week|bytes }}</span>
+        </div>
+        <div class="bar"><span style="width:{{ (100 * i.http_week / top)|round(1) }}%"></span></div>
+      </div>
+      {% endfor %}
+      {% else %}<div class="empty">Nothing booted in the last 7 days.</div>{% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

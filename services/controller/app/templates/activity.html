@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Activity</h1>
+<p class="subtitle">Boot choices, HTTP downloads and Windows share access, newest first (last 500).</p>
+
+<form class="filters" method="get">
+  <div><label>Client MAC</label><input type="text" name="mac" value="{{ mac }}" placeholder="any"></div>
+  <div><label>Image id</label><input type="text" name="item" value="{{ item }}" placeholder="any"></div>
+  <div style="min-width:0"><button type="submit">Filter</button></div>
+  {% if mac or item %}<div style="min-width:0"><a class="button ghost" href="/activity">Clear</a></div>{% endif %}
+</form>
+
+<div class="card">
+  {% with show_who=true %}{% include "_activity.html" %}{% endwith %}
+</div>
+{% endblock %}

@@ -6,7 +6,7 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    # RWO Longhorn volume: the old pod must release it first.
+    # RWO volumes: the old pod must release them first.
     type: Recreate
   selector:
     matchLabels:
@@ -29,6 +29,8 @@ spec:
             - name: nginx-conf
               mountPath: /etc/nginx/conf.d
               readOnly: true
+            - name: logs
+              mountPath: /var/log/pxe
           resources:
             requests:
               cpu: 20m
@@ -56,11 +58,16 @@ spec:
                 secretKeyRef:
                   name: pxe-smb
                   key: password
+            # Audit log + smbstatus snapshots for the controller
+            - name: PXE_LOG_DIR
+              value: /var/log/pxe
           volumeMounts:
             - name: data
               mountPath: /srv/images
               subPath: images
               readOnly: true
+            - name: logs
+              mountPath: /var/log/pxe
           resources:
             requests:
               cpu: 20m
@@ -70,6 +77,43 @@ spec:
           readinessProbe:
             tcpSocket:
               port: smb
+            periodSeconds: 10
+
+        # Control center: per-client menus (nginx proxies /boot.ipxe and
+        # /ipxe/* to it on localhost) and the web UI (Service pxe-controller).
+        - name: controller
+          image: pxe-controller
+          ports:
+            - name: controller
+              containerPort: 8000
+          env:
+            - name: TZ
+              value: UTC
+            # Basic auth for the web UI (user "admin"); drop it if an
+            # authenticating proxy (e.g. Authentik forward-auth) sits in front.
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pxe-admin
+                  key: password
+          volumeMounts:
+            - name: data
+              mountPath: /srv/http
+              readOnly: true
+            - name: logs
+              mountPath: /var/log/pxe
+            - name: controller-db
+              mountPath: /var/lib/pxe-controller
+          resources:
+            requests:
+              cpu: 20m
+              memory: 96Mi
+            limits:
+              memory: 384Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: controller
             periodSeconds: 10
 
         # Upload target for `./pxe push` (rsync over `kubectl exec`); the
@@ -90,6 +134,14 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: pxe-data
+        - name: controller-db
+          persistentVolumeClaim:
+            claimName: pxe-controller
         - name: nginx-conf
           configMap:
             name: pxe-nginx
+        # nginx JSON access log, samba audit log and smbstatus snapshots,
+        # consumed (and truncated) by the controller.
+        - name: logs
+          emptyDir:
+            sizeLimit: 512Mi

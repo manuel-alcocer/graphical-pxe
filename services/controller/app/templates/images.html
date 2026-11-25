@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Images</h1>
+<p class="subtitle">Usage of every boot entry. Downloads that several entries share (e.g. the same <code>boot.wim</code>)
+are counted for the entry the computer chose.</p>
+
+<div class="card">
+  <table>
+    <thead><tr><th>Image</th><th>Category</th><th class="right">Boots (7 d)</th><th class="right">Computers</th>
+      <th class="right">HTTP (7 d)</th><th class="right">HTTP total</th><th class="right">SMB files</th><th>Last used</th></tr></thead>
+    <tbody>
+    {% for i in images %}
+    <tr>
+      <td><a href="/activity?item={{ i.id }}">{{ i.label }}</a>
+        {% if not i.in_catalog %}<span class="pill">removed</span>{% endif %}
+        <div class="muted small mono">{{ i.id }}</div></td>
+      <td class="muted">{{ categories.get(i.category, i.category) }}</td>
+      <td class="right">{{ i.boots }} <span class="muted">({{ i.boots_week }})</span></td>
+      <td class="right">{{ i.clients }}</td>
+      <td class="right nowrap">{{ i.http_week|bytes }}</td>
+      <td class="right nowrap">{{ i.http_bytes|bytes }}</td>
+      <td class="right">{{ i.smb_opens or '' }}</td>
+      <td class="nowrap">{{ i.last_used|ago }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

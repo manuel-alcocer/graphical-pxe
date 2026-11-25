@@ -1,0 +1,31 @@
+{# Activity rows: events (boot choices, SMB sessions) and transfers (HTTP downloads, SMB file opens) #}
+{% if rows %}
+<table>
+  <thead><tr><th>When</th>{% if show_who %}<th>Client</th>{% endif %}<th>What</th><th>Image</th><th class="right">Size</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr>
+    <td class="nowrap" title="{{ r.ts|localtime }}">{{ r.ts|localtime('%d %b %H:%M:%S') }}</td>
+    {% if show_who %}
+    <td class="nowrap">{% if r.mac %}<a href="/clients/{{ r.mac }}">{{ r.who }}</a>{% else %}<span class="muted">{{ r.ip }}</span>{% endif %}</td>
+    {% endif %}
+    <td>
+      {% if r.kind == 'choice' %}<span class="pill accent">boot</span> chose <strong>{{ label(r.item) }}</strong>
+      {% elif r.kind == 'scheduled' %}<span class="pill warn">scheduled</span> scheduled boot of <strong>{{ label(r.item) }}</strong>
+      {% elif r.kind == 'local-policy' %}<span class="pill">policy</span> sent to local disk ({{ r.detail }})
+      {% elif r.kind == 'http' %}<span class="pill">http</span> <span class="mono">{{ r.path }}</span>{% if r.status and r.status >= 400 %} <span class="pill danger">{{ r.status }}</span>{% elif r.status == 206 %} <span class="pill">partial</span>{% endif %}
+      {% elif r.kind == 'smb' %}<span class="pill ok">smb</span> opened <span class="mono">{{ r.path }}</span>
+      {% elif r.kind == 'smb-connect' %}<span class="pill ok">smb</span> mounted the share <span class="muted">({{ r.detail }})</span>
+      {% elif r.kind == 'smb-disconnect' %}<span class="pill">smb</span> unmounted the share
+      {% elif r.kind == 'smb-denied' %}<span class="pill danger">smb</span> login refused <span class="muted">({{ r.detail }})</span>
+      {% else %}<span class="pill">{{ r.kind }}</span> {{ r.detail or '' }}{% endif %}
+    </td>
+    <td class="small" style="max-width:220px">{% if r.item %}<a href="/activity?item={{ r.item }}">{{ label(r.item) }}</a>{% endif %}</td>
+    <td class="right nowrap">{% if r.bytes is not none %}{{ r.bytes|bytes }}{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No activity yet.</div>
+{% endif %}

@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}{{ client.name or client.mac }} · PXE control center{% endblock %}
+{% block content %}
+<h1>{{ client.name or client.hostname or client.mac }}</h1>
+<p class="subtitle mono">{{ client.mac }}{% if client.ip %} · {{ client.ip }}{% endif %}</p>
+
+{% if client.next_boot %}
+<div class="banner">Next boot is scheduled: <strong>{{ label(client.next_boot) }}</strong>. The menu is skipped
+(the user can still press <code>m</code> within 5 s); it is cleared once that entry boots.</div>
+{% endif %}
+
+<div class="grid cols-2">
+  <div>
+    <div class="card">
+      <h2>History</h2>
+      {% with rows=history, show_who=false %}{% include "_activity.html" %}{% endwith %}
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>Settings</h2>
+      <form method="post" action="/clients/{{ client.mac }}">
+        <label>Name</label><input type="text" name="name" value="{{ client.name }}" placeholder="{{ client.hostname or 'e.g. lab-pc-03' }}">
+        <label>Group</label>
+        <select name="group_id">{% for g in groups %}<option value="{{ g.id }}" {{ 'selected' if g.id == client.group_id }}>{{ g.name }}</option>{% endfor %}</select>
+        <div class="muted small" style="margin-top:4px">
+          {% if group.mode == 'local' %}This group boots from the local disk without a menu.
+          {% elif group['items'] is none %}This group offers every image.
+          {% else %}This group offers {{ group['items']|length }} image(s).{% endif %}
+          <a href="/groups?edit={{ group.id }}">Edit group</a>
+        </div>
+        <label>Notes</label><textarea name="notes">{{ client.notes }}</textarea>
+        <div class="actions"><button type="submit">Save</button></div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Next boot</h2>
+      <p class="muted small" style="margin-top:-6px">Boot this entry the next time the computer starts from the network, then go back to normal.</p>
+      <form method="post" action="/clients/{{ client.mac }}/next-boot">
+        <select name="item">
+          <option value="">— nothing scheduled —</option>
+          {% for cat, title in categories.items() %}
+            {% set cat_items = items|selectattr('category', 'equalto', cat)|list %}
+            {% if cat_items %}<optgroup label="{{ title }}">
+              {% for i in cat_items %}<option value="{{ i.id }}" {{ 'selected' if i.id == client.next_boot }}>{{ i.label }}</option>{% endfor %}
+            </optgroup>{% endif %}
+          {% endfor %}
+        </select>
+        <div class="actions"><button type="submit">Schedule</button></div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Hardware</h2>
+      <dl class="kv">
+        <dt>Manufacturer</dt><dd>{{ client.manufacturer or '—' }}</dd>
+        <dt>Model</dt><dd>{{ client.product or '—' }}</dd>
+        <dt>Serial</dt><dd class="mono">{{ client.serial or '—' }}</dd>
+        <dt>UUID</dt><dd class="mono small">{{ client.uuid or '—' }}</dd>
+        <dt>Firmware</dt><dd>{{ {'efi': 'UEFI', 'pcbios': 'BIOS'}.get(client.platform, client.platform or '—') }} {% if client.arch %}<span class="muted">({{ client.arch }})</span>{% endif %}</dd>
+        <dt>DHCP hostname</dt><dd>{{ client.hostname or '—' }}</dd>
+        <dt>First seen</dt><dd>{{ client.first_seen|localtime or '—' }}</dd>
+        <dt>Last seen</dt><dd>{{ client.last_seen|localtime or '—' }}</dd>
+        <dt>Downloaded</dt><dd>{{ totals.http|bytes }} over HTTP, {{ totals.smb }} file(s) opened over SMB</dd>
+      </dl>
+      <form method="post" action="/clients/{{ client.mac }}/delete" class="actions"
+            onsubmit="return confirm('Forget this client? Its history stays in Activity.')">
+        <button type="submit" class="danger">Forget client</button>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}

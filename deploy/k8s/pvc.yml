@@ -12,3 +12,18 @@ spec:
   resources:
     requests:
       storage: 60Gi
+
+---
+# SQLite database of the control center (clients, groups, history).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pxe-controller
+  namespace: pxe
+spec:
+  accessModes:
+    - ReadWriteOnce
+  # storageClassName: longhorn
+  resources:
+    requests:
+      storage: 1Gi

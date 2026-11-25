@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Clients</h1>
+<p class="subtitle">Every computer that asked for the boot menu, identified by the MAC address of the NIC it booted from.
+Its group decides what it is offered.</p>
+
+<div class="card">
+  {% if clients %}
+  <table>
+    <thead><tr><th>Client</th><th>Hardware</th><th>Firmware</th><th>Group</th><th>Last boot</th><th>Last seen</th><th class="right">HTTP, 7 d</th></tr></thead>
+    <tbody>
+    {% for c in clients %}
+    <tr>
+      <td>
+        <span class="dot {{ 'live' if c.last_active and now - c.last_active < active_seconds }}"></span>
+        <a href="/clients/{{ c.mac }}">{{ c.name or c.hostname or c.mac }}</a>
+        <div class="muted small mono">{{ c.mac }}{% if c.ip %} · {{ c.ip }}{% endif %}</div>
+        {% if c.next_boot %}<span class="pill warn small">next: {{ label(c.next_boot) }}</span>{% endif %}
+      </td>
+      <td>{{ c.manufacturer or '' }}<div class="muted small">{{ c.product or '' }}{% if c.serial %} · {{ c.serial }}{% endif %}</div></td>
+      <td>{% if c.platform %}<span class="pill">{{ 'UEFI' if c.platform == 'efi' else 'BIOS' if c.platform == 'pcbios' else c.platform }}</span>{% endif %}</td>
+      <td>
+        <form class="inline" method="post" action="/clients/{{ c.mac }}/group">
+          <select class="compact" name="group_id" onchange="this.form.submit()">
+            {% for g in groups %}<option value="{{ g.id }}" {{ 'selected' if g.id == c.group_id }}>{{ g.name }}</option>{% endfor %}
+          </select>
+        </form>
+      </td>
+      <td>{{ label(c.last_item) or '—' }}</td>
+      <td class="nowrap" title="{{ c.last_seen|localtime }}">{{ c.last_active|ago }}</td>
+      <td class="right nowrap">{{ c.bytes_week|bytes }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">No client has booted from the network yet.</div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Add a computer before it boots</h2>
+  <p class="muted small" style="margin-top:-6px">Put a MAC in a group in advance, e.g. to schedule its first installation.</p>
+  <form method="post" action="/clients" class="filters">
+    <div><label>MAC address</label><input type="text" name="mac" placeholder="aa:bb:cc:dd:ee:ff" required></div>
+    <div><label>Name</label><input type="text" name="name" placeholder="optional"></div>
+    <div><label>Group</label><select name="group_id">{% for g in groups %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}</select></div>
+    <div style="min-width:0"><button type="submit">Add</button></div>
+  </form>
+</div>
+{% endblock %}

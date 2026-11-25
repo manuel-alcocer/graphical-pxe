@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}PXE control center{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  {% block head %}{% endblock %}
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/"><span class="logo">⌁</span> PXE control center</a>
+  <nav>
+    <a href="/" class="{{ 'on' if nav == 'dashboard' }}">Dashboard</a>
+    <a href="/clients" class="{{ 'on' if nav in ('clients', 'client') }}">Clients</a>
+    <a href="/groups" class="{{ 'on' if nav == 'groups' }}">Groups</a>
+    <a href="/images" class="{{ 'on' if nav == 'images' }}">Images</a>
+    <a href="/activity" class="{{ 'on' if nav == 'activity' }}">Activity</a>
+  </nav>
+  {% if user %}<span class="user">{{ user }}</span>{% endif %}
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

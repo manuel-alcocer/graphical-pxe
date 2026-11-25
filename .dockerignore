@@ -1,0 +1,6 @@
+data/
+ipxe-bin/
+docs/
+.env
+.env.*
+.git/

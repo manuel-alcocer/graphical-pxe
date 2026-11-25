@@ -7,7 +7,8 @@ menu, on BIOS and UEFI machines, without touching your router's DHCP.
  client NIC ──DHCP──► router (gives the IP)
             ──DHCP──► dnsmasq ProxyDHCP (adds "boot undionly.kpxe / snponly.efi")
             ──TFTP──► custom iPXE (framebuffer + PNG + HTTPS, embedded script)
-            ──HTTP──► nginx: boot.ipxe menu, kernels, initrds, ISOs, boot.wim
+            ──HTTP──► nginx: kernels, initrds, ISOs, boot.wim
+                      └─ /boot.ipxe → controller: menu built for this MAC
  Windows    ──SMB───► samba: Windows Setup reads install.wim from the share
 ```
 
@@ -16,14 +17,19 @@ menu, on BIOS and UEFI machines, without touching your router's DHCP.
 | `dnsmasq` | 67, 4011 udp, 69 | ProxyDHCP + TFTP, ships the iPXE binaries        |
 | `http`    | 80               | nginx serving `data/http`                        |
 | `smb`     | 445              | samba share `images` (read-only, user `pxe`)     |
+| `controller` | 8000          | control center: per-client menus, usage, web UI  |
 
-All three use host networking (PXE relies on broadcasts).
+All of them use host networking (PXE relies on broadcasts).
 
 ## Screenshots
 
 | Main menu | Submenu | Windows Setup over the network |
 |---|---|---|
 | ![](docs/screenshots/01-main-menu.png) | ![](docs/screenshots/04-windows-installers.png) | ![](docs/screenshots/12-windows-setup.png) |
+
+| Control center | Clients | Group (boot policy) |
+|---|---|---|
+| ![](docs/screenshots/20-control-dashboard.png) | ![](docs/screenshots/21-control-clients.png) | ![](docs/screenshots/23-control-groups.png) |
 
 More in [`docs/screenshots/`](docs/screenshots/).
 
@@ -83,6 +89,41 @@ Other per-entry options in `catalog.toml`:
   image inside `boot.wim` (in Windows media, 1 = plain WinPE, 2 = Setup).
 - `args` may use `{base}`, `{iso}`, `{server}` and also raw iPXE variables
   such as `${netX/mac:hexhyp}`.
+
+## Control center
+
+A small web app (`services/controller`, FastAPI + SQLite) that sits behind
+nginx and answers `/boot.ipxe`:
+
+- **Per-client menus.** iPXE sends the MAC address of the NIC it booted from,
+  plus manufacturer, model, serial, UUID and BIOS/UEFI. The controller looks up
+  the computer's **group** and builds a menu with only what that group allows.
+  Unknown computers are registered on their first boot into the group
+  `default`.
+- **Groups** are boot policies: which images are offered (or all of them,
+  including future ones), which tools (netboot.xyz, iPXE shell), what boots
+  when the menu times out and after how long, or "skip the menu and boot from
+  the local disk".
+- **Next boot.** Schedule an entry for one computer: on its next network boot
+  it starts that entry after 5 s (press `m` for the menu), once.
+- **Usage.** Every menu choice is reported by the menu itself
+  (`imgfetch` of `/ipxe/event`, freed at once). Downloads come from nginx's JSON
+  access log and are attributed to a client by IP → MAC (the IP iPXE announced)
+  and to an image by path. The Windows share is audited with samba's
+  `full_audit` (who mounts it, which files are opened) and `smbstatus --json`
+  (live sessions). Logs are shared through `data/logs` (an `emptyDir` in
+  Kubernetes) and truncated once consumed; history is kept 90 days
+  (`PXE_KEEP_DAYS`).
+- If the controller is down, nginx falls back to the static full menu written
+  by `./pxe build`, so booting never depends on it.
+
+The web UI listens on port 8000. With docker compose set `ADMIN_PASSWORD` in
+`.env` (user `admin`); in Kubernetes publish the `pxe-controller` Service with
+an Ingress behind your SSO, and keep `externalTrafficPolicy: Local` on the
+LoadBalancer so nginx and samba see the real client IPs.
+
+MAC addresses can be spoofed: groups decide what is *offered*, they are not
+access control.
 
 ## Windows notes
 
@@ -152,7 +193,9 @@ cp .env.example .env.k8s                 # SERVER_IP = the LoadBalancer IP,
 | `PROXY_SUBNET`  | network address for proxy mode, e.g. `192.168.1.0`           |
 | `DHCP_RANGE`…   | only for `full` mode                                         |
 | `SMB_USER/PASS` | share credentials                                            |
-| `MENU_TIMEOUT`  | seconds before booting the local disk (0 = wait forever)     |
+| `MENU_TIMEOUT`  | seconds before booting the local disk (0 = wait forever); default for groups without their own timeout |
+| `ADMIN_PASSWORD`| password of the control center web UI (user `admin`); empty = no login |
+| `TZ`            | time zone shown in the control center                        |
 
 ## Customising the look
 

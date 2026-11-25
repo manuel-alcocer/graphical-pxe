@@ -15,7 +15,12 @@ configMapGenerator:
 
 # Build services/samba and push it to a registry your cluster can pull from:
 #   docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/pxe-samba:0.1.0 --push services/samba
+#   docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/pxe-controller:0.1.0 \
+#       -f services/controller/Dockerfile --push .
 images:
   - name: pxe-samba
     newName: registry.example.com/pxe-samba
+    newTag: 0.2.0
+  - name: pxe-controller
+    newName: registry.example.com/pxe-controller
     newTag: 0.1.0

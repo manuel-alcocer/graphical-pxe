@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Groups</h1>
+<p class="subtitle">A group is a boot policy: which images its computers see, what boots when the menu times out,
+or whether they skip the menu and boot from their disk. Unknown computers land in <strong>default</strong>.</p>
+
+<div class="grid cols-2">
+  <div class="card">
+    <div class="section-head"><h2>Groups</h2><a class="button ghost" href="/groups?edit=0">+ New group</a></div>
+    <table>
+      <thead><tr><th>Group</th><th>Offers</th><th>On timeout</th><th class="right">Computers</th><th></th></tr></thead>
+      <tbody>
+      {% for g in groups %}
+      <tr>
+        <td><a href="/groups?edit={{ g.id }}"><strong>{{ g.name }}</strong></a><div class="muted small">{{ g.description }}</div></td>
+        <td>
+          {% if g.mode == 'local' %}<span class="pill">local disk only</span>
+          {% elif g['items'] is none %}<span class="pill accent">all images</span>
+          {% else %}<span class="pill">{{ g['items']|length }} image(s)</span>{% endif %}
+        </td>
+        <td>{% if g.mode == 'local' %}—{% else %}{{ label(g.default_item or 'local') }}
+            <span class="muted small">{% if g.timeout is none %}(global timeout){% elif g.timeout == 0 %}(waits forever){% else %}after {{ g.timeout }} s{% endif %}</span>{% endif %}</td>
+        <td class="right"><a href="/clients">{{ g.members }}</a></td>
+        <td class="right">
+          {% if g.name != 'default' %}
+          <form class="inline" method="post" action="/groups/{{ g.id }}/delete" onsubmit="return confirm('Delete group {{ g.name }}? Its computers move to default.')">
+            <button class="danger" type="submit">Delete</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+  {% if current or new %}
+    {% set g = current or {'id': 0, 'name': '', 'description': '', 'mode': 'menu', 'items': none, 'tools': none, 'default_item': none, 'timeout': none} %}
+    <h2>{{ 'Edit ' ~ g.name if current else 'New group' }}</h2>
+    <form method="post" action="/groups">
+      <input type="hidden" name="id" value="{{ g.id }}">
+      <label>Name</label>
+      <input type="text" name="name" value="{{ g.name }}" required {{ 'readonly' if g.name == 'default' }}>
+      <label>Description</label>
+      <input type="text" name="description" value="{{ g.description }}">
+
+      <label>Behaviour</label>
+      <label class="check"><input type="radio" name="mode" value="menu" {{ 'checked' if g.mode != 'local' }}> Show the boot menu</label>
+      <label class="check"><input type="radio" name="mode" value="local" {{ 'checked' if g.mode == 'local' }}> Boot from the local disk, no menu <span class="muted small">(a scheduled next boot still applies)</span></label>
+
+      <label>Images offered</label>
+      <label class="check"><input type="checkbox" name="all_items" value="1" {{ 'checked' if g['items'] is none }}
+             onchange="document.getElementById('item-list').style.opacity = this.checked ? 0.4 : 1"> All images, including ones added later</label>
+      <div id="item-list" class="checks" style="opacity: {{ 0.4 if g['items'] is none else 1 }}">
+        {% for cat, title in categories.items() %}
+          {% set cat_items = items|selectattr('category', 'equalto', cat)|list %}
+          {% if cat_items %}
+            <div class="cat">{{ title }}</div>
+            {% for i in cat_items %}
+            <label class="check"><input type="checkbox" name="items" value="{{ i.id }}" {{ 'checked' if g['items'] and i.id in g['items'] }}> {{ i.label }}</label>
+            {% endfor %}
+          {% endif %}
+        {% endfor %}
+      </div>
+
+      <label>Tools</label>
+      {% for tool, title in tools.items() %}
+      <label class="check"><input type="checkbox" name="tools" value="{{ tool }}" {{ 'checked' if g.tools is none or tool in g.tools }}> {{ title }}</label>
+      {% endfor %}
+      <div class="muted small">Local disk, reboot and power off are always available.</div>
+
+      <label>When the menu times out, boot</label>
+      <select name="default_item">
+        <option value="">Local disk</option>
+        {% for i in items %}<option value="{{ i.id }}" {{ 'selected' if i.id == g.default_item }}>{{ i.label }}</option>{% endfor %}
+      </select>
+      <label>Timeout in seconds <span class="muted">(empty = global MENU_TIMEOUT, 0 = wait forever)</span></label>
+      <input type="number" min="0" name="timeout" value="{{ '' if g.timeout is none else g.timeout }}">
+
+      <div class="actions">
+        <button type="submit">Save</button>
+        <a class="button ghost" href="/groups">Cancel</a>
+      </div>
+    </form>
+  {% else %}
+    <h2>How it works</h2>
+    <p class="muted">When a computer boots from the network, iPXE sends its MAC address, model and serial number.
+    The controller looks up its group and builds a menu with only the images that group allows.</p>
+    <p class="muted">Pick a group on the left to edit it, or create a new one and move computers into it from
+    <a href="/clients">Clients</a>.</p>
+    <p class="muted small">MAC addresses can be spoofed: groups decide what is offered, they are not an access control.</p>
+  {% endif %}
+  </div>
+</div>
+{% endblock %}

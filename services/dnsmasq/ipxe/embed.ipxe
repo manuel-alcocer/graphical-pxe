@@ -17,6 +17,9 @@ goto shell
 :load_menu
 echo Loading menu from http://${pxe-server}/boot.ipxe ...
 chain --autofree http://${pxe-server}/boot.ipxe || goto menu_failed
+# The menu returned on purpose ("Boot from local disk" on EFI): leave iPXE so the
+# firmware moves on to the next boot device instead of falling into the retry loop.
+exit
 
 :dhcp_failed
 echo DHCP failed, retrying in 3 seconds...
