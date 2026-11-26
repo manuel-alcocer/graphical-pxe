@@ -115,12 +115,15 @@ def healthz() -> dict:
 IPXE = "text/plain; charset=utf-8"
 
 
-def client_ip(request: Request, announced: str = "") -> str:
-    if announced and announced != "0.0.0.0":
-        return announced
+def peer_ip(request: Request) -> str:
+    """Source address as nginx and samba see it (differs from the client's own IP behind NAT)."""
     real = request.headers.get("x-real-ip")
     host = request.client.host if request.client else ""
     return real if real and host in ("127.0.0.1", "::1") else host
+
+
+def client_ip(request: Request, announced: str = "") -> str:
+    return announced if announced and announced != "0.0.0.0" else peer_ip(request)
 
 
 @app.get("/ipxe/boot.ipxe", response_class=PlainTextResponse)
@@ -143,10 +146,12 @@ def ipxe_menu(request: Request, mac: str, ip: str = "", hostname: str = "", uuid
     mac = normalize_mac(mac)
     if not MAC_RE.match(mac):
         raise HTTPException(400, "bad mac")
-    ip = client_ip(request, ip)
-    info = {"ip": ip, "hostname": hostname, "uuid": uuid, "serial": serial, "manufacturer": manufacturer,
-            "product": product, "platform": platform, "arch": arch}
+    info = {"ip": client_ip(request, ip), "hostname": hostname, "uuid": uuid, "serial": serial,
+            "manufacturer": manufacturer, "product": product, "platform": platform, "arch": arch}
     client = db.touch_client(mac, {k: v.strip()[:200] for k, v in info.items()})
+    # Events store the peer address: HTTP and SMB log lines are matched to MACs through it,
+    # and behind NAT it is not the address the client announces
+    ip = peer_ip(request)
     group = db.group(client["group_id"])
     scheduled = client["next_boot"] if client["next_boot"] and catalog.item(client["next_boot"]) else None
 
@@ -174,7 +179,7 @@ def ipxe_menu(request: Request, mac: str, ip: str = "", hostname: str = "", uuid
 def ipxe_event(request: Request, mac: str, item: str) -> Response:
     mac = normalize_mac(mac)
     client = db.client(mac)
-    db.add_event("choice", mac, client_ip(request, client["ip"] if client else ""), item[:100])
+    db.add_event("choice", mac, peer_ip(request), item[:100])
     if client and client["next_boot"] == item:
         db.execute("UPDATE clients SET next_boot = NULL WHERE mac = ?", (mac,))
     return Response("#!ipxe\n", media_type=IPXE)
